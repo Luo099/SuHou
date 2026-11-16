@@ -8,6 +8,8 @@ dist/
 .venv/
 .pytest_cache/
 .ruff_cache/
+tests/
+pytest-of-*/
 .coverage
 htmlcov/
 
@@ -25,6 +27,7 @@ artifacts/**
 # Editor / OS files
 .idea/
 .vscode/
+.zcode/
 .DS_Store
 Thumbs.db
 desktop.ini
