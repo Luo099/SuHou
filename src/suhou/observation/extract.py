@@ -4,9 +4,11 @@ The Tenhou adapter has already decoded every protocol detail. This module only
 selects decision events, freezes result-group state, and asks
 ``project_visible`` for the viewer-filtered history prefix.
 
-The rules engine is not part of this branch yet. Callers supply a
-``rules_state_factory`` per decision; it is the seam where the reused rules
-engine will provide furiten (and later legal actions).
+This is the compatibility extractor: it describes the actual recorded action
+and keeps the 225-point baseline. The rules-driven path lives in
+``suhou.rules.iter_player_decisions``, drives a ``PlayerRuleEngine`` through
+every event, and uses the post-event state. This extractor keeps its original
+``rules_state_factory`` seam for callers that supply their own rules state.
 """
 
 from __future__ import annotations

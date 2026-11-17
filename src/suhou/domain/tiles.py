@@ -20,6 +20,19 @@ _TILE_KINDS = tuple(
 _TILE_KIND_ORDER = {kind: index for index, kind in enumerate(_TILE_KINDS)}
 _RED_FIVE_KINDS = frozenset({"5m", "5p", "5s"})
 
+# Public 34-kind numbering shared by rule analysis and future action codecs:
+# 0..8 = 1m..9m, 9..17 = 1p..9p, 18..26 = 1s..9s, 27..30 = winds, 31..33 =
+# dragons. The order matches the physical tile ID division (``tile // 4``).
+TILE_KINDS = _TILE_KINDS
+TILE_KIND_INDEX = _TILE_KIND_ORDER
+
+
+def tile_kind_from_index(index: int) -> str:
+    """Return the kind name for a 0..33 tile-kind index."""
+    if not 0 <= index < len(_TILE_KINDS):
+        raise ValueError(f"Tile kind index must be in 0..33, got {index}")
+    return _TILE_KINDS[index]
+
 
 class Wind(StrEnum):
     """A mahjong wind, indexed by the 0..3 order 东南西北."""

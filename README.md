@@ -43,7 +43,8 @@ SuHou/
 │   ├── domain/   通用麻将类型、统一事件、状态视图与可见性投影
 │   ├── replay/   通用重放引擎与 events.jsonl 读写
 │   ├── tenhou/   天凤 XML 解析、协议适配与兼容入口
-│   └── observation/  Observation v1 构造与提取
+│   ├── observation/  Observation v1 构造与提取
+│   └── rules/    单座位规则引擎、候选动作与规则驱动提取器
 ├── tests/        自动化测试
 └── pyproject.toml
 ```
@@ -116,8 +117,8 @@ uv run python -m suhou tenhou-replay \
 from suhou.observation import RulesSnapshot, iter_decision_points
 
 def rules_state(round_state, event, viewer):
-    # 规则引擎接入前的占位。furiten 必须由规则引擎计算；
-    # RulesSnapshot 只是显式的最小适配器，不是规则实现。
+    # 兼容提取器的显式占位。真实振听请使用 suhou.rules.PlayerRuleEngine，
+    # 或直接用 suhou.rules.iter_player_decisions。
     return RulesSnapshot((False, False, False, False))
 
 points = list(iter_decision_points(
@@ -131,14 +132,64 @@ print(observation.to_dict())
 - observation 包含 `viewer`、`table`、`self`、`players`、`context`、`history`。`players` 始终按绝对座位 0..3 排列；`self` 只给出当前观察者的手牌、摸入牌和振听。
 - 牌张使用 `Tile(kind, red)` 表示，赤五保留为 `5m/5p/5s + red=True`，不包含实体牌编号；无赤牌规则的对局按 `<GO type>` 解释为 `red=False`。手牌按牌种、赤牌标记排序（同牌种赤牌在前）；舍牌、副露和历史按发生顺序排列。
 - `build_observation(replay_state, rules_state, visible_history, viewer, decision_context)` 逐字段读取当前状态（`RoundState` 或不可变 `RoundView`），返回不可变快照。它不读取对手手牌内容、对手摸入牌、里宝牌或结算内部字段。
-- `history` 是本局开始到本次决策前的可见事件前缀，由 `project_visible()` 从统一事件白名单投影得到。自己的起手牌和摸牌有实际牌张，对手摸牌只有 `tile=None`；对手的起手牌不会出现在历史里。后续鸣牌只追加新事件，不回写旧样本。
+- `history` 是本局开始到决策边界的可见事件前缀，由 `project_visible()` 从统一事件白名单投影得到。自己的起手牌和摸牌有实际牌张，对手摸牌只有 `tile=None`；对手的起手牌不会出现在历史里。后续鸣牌只追加新事件，不回写旧样本。兼容提取器在事件执行前取数（不含实际动作），规则驱动路径在事件执行后取数（包含当前触发事件）。
 - `seq` 是局内源事件序号，每局从 `INIT` 的 0 重新开始；局内元数据不占序号，因此舍牌和副露的 `seq` 可以有间隔，但始终严格递增。`trigger_seq` 是触发本次决策的摸牌/舍牌/鸣牌事件。
 - `table.match_type` 由天凤适配器从 `<GO type>` 规则位一次性解出并保存在状态中；`0x08` 为半庄，`0x10` 为三麻（Observation v1 拒绝三麻）。当前样例 `type=1` 是东风战；它在东4局无人达到 30000 点后南入到南1局，因此 `match_type` 为 `tonpu`，不是半庄。
-- `DecisionPhase` 目前由提取层按统一事件给出（`discard`/`response`/`riichi`/`self_kan`/`tsumo`），属于规则引擎接入前的临时适配。合法动作集合、动作掩码和实际动作标签不放进 observation，仍留给 sample 层。
-- `RulesState` 目前只要求 `furiten(viewer)`。真实振听、临时振听和立直振听必须由复用的规则引擎提供；`RulesSnapshot` 没有默认值，上面显式传入的四家 `False` 只是占位，不能当成规则结果。新的 rules factory 接收 `(RoundView, GameEvent, viewer)`；仍检查天凤源事件的旧 factory 需用 `legacy_rules_state_factory()` 显式包装。
-- `iter_decision_points` 是逐实际动作截取 observation 的便捷入口，内部使用 `iter_replay()` 的不可变帧，在事件执行前取数。它不会为未记录的“跳过鸣牌/跳过荣和”补样本；立直宣言与随后的舍牌是两个源事件，会各自产生一个 decision point，sample 层可按需合并。多条和了共享一个 decision 状态：所有结果观测都使用结算组开始前的状态与历史截止位置。
+- `DecisionPhase` 在兼容提取器中仍是按实际记录动作给出的 `discard`/`response`/`riichi`/`self_kan`/`tsumo`；规则驱动路径新增 `turn`/`after_call`/`riichi_discard`/`kan_response`，描述决策窗口而不是已经发生的实际选择。合法动作集合、动作掩码和实际动作标签不放进 observation，仍留给 sample 层。
+- `RulesState` 只要求 `furiten(viewer)`。`PlayerRuleEngine` 现在直接实现该协议，因此 `build_observation()` 可以消费真实振听；`RulesSnapshot` 没有默认值，仍保留给旧调用方和测试作为显式适配器。新的 rules factory 接收 `(RoundView, GameEvent, viewer)`；仍检查天凤源事件的旧 factory 需用 `legacy_rules_state_factory()` 显式包装。
+- `iter_decision_points` 是逐实际动作截取 observation 的兼容入口，内部使用 `iter_replay()` 的不可变帧，在事件执行前取数。它不会为未记录的“跳过鸣牌/跳过荣和”补样本；立直宣言与随后的舍牌是两个源事件，会各自产生一个 decision point，sample 层可按需合并。多条和了共享一个 decision 状态：所有结果观测都使用结算组开始前的状态与历史截止位置。
+- 规则驱动路径使用 `iter_player_decisions(source, viewer)`：它复用 `iter_replay()`，在每个事件后用 `PlayerRuleEngine.update()` 生成候选，再用包含当前触发事件的可见历史构造 observation。候选动作放在 `RuleDecision` 中，不进入 observation 契约。
 - `DecisionPoint` 额外带 `round_ordinal`（局实例序号，连庄时同一 `seed[0]` 仍可区分）、`event_seq`（历史截止位置）和源事件标识。这些是审计/落盘字段，不属于 observation 契约。
 - `EventType`、`Tile`、`MatchType`、`MeldType` 等通用类型定义在 `suhou.domain`，旧的 `suhou.observation` 导入路径继续可用。
+
+## 规则引擎
+
+`src/suhou/rules/` 为指定的训练座位 `viewer` 提供事件后规则判断。`ReplayEngine` 仍是唯一的状态写入者；规则引擎只读取不可变的 `RoundView`，维护自己的振听、一发、杠与等待等派生状态，并为 `viewer` 返回结构化候选动作。
+
+```python
+from suhou.rules import PlayerRuleEngine, iter_player_decisions
+from suhou.tenhou import iter_replay
+
+engine = PlayerRuleEngine(viewer=0)
+for frame in iter_replay("data/raw/tenhou/sample.mjlog"):
+    decision = engine.update(frame.event, frame.after)
+    if decision is not None:
+        print(decision.kind, decision.actions)
+
+# 或者直接取得“候选 + observation + 源事件审计”：
+for point in iter_player_decisions("data/raw/tenhou/sample.mjlog", viewer=0):
+    print(point.decision.kind, point.decision.actions)
+    print(point.observation.to_dict())
+```
+
+决策窗口：
+
+- `turn`：自己摸牌后。切牌、立直、自摸、暗杠、加杠、九种九牌。
+- `after_call`：自己吃/碰后。只开放切牌，并按本次实际鸣牌应用食替限制。
+- `riichi_discard`：自己立直宣言后。只开放能保持听牌的宣言切牌。
+- `response`：他家舍牌后。只计算 `viewer` 的荣和、吃、碰、明杠和 `pass`；没有候选时不创建“只能 pass”的决策。
+- `kan_response`：他家加杠后。只检查抢杠荣和与 `pass`。
+
+动作使用 `Tile`、赤五标记和副露 `formed_seq` 表达，是规则层的规范输出：
+
+```text
+DiscardAction / ChiAction / PonAction / MinkanAction / AnkanAction /
+KakanAction / RiichiAction / TsumoAction / RonAction / KyushuAction / PassAction
+```
+
+规则边界：
+
+- 首版只覆盖四人天凤规则；不支持三麻、多人响应仲裁、头跳或“碰优先于吃”的裁决。每个 `viewer` 独立运行。
+- 候选只属于 `viewer`，不读取对手手牌、对手摸入牌或未来事件来生成候选；结果 payload 只用于判定一次已经发生的荣和窗口是否被取用，不参与候选生成。可见性测试会替换对手私有手牌并确认候选与 observation 不变。
+- 每个事件重新生成候选；即使只有一个强制动作也返回决策点，是否过滤由上层决定。普通同种实体牌不区分，赤五保留语义。
+- 和了合法性检查包含和了形与“有役”，但不计算符数、飜数或点数；宝牌/里宝牌/赤宝牌不计为役。和了形覆盖标准形、七对子、国士，并支持吃碰杠后的副露形。
+- 立直要求门清（暗杠仍算门清）、至少 1000 点、牌墙至少剩 4 张且存在至少一种切后听牌；宣言后尚未扣 1000 点，宣言牌被荣和时不会产生立直成立决策。立直后的摸牌只允许摸切，以及不改变听牌的暗杠、自摸；禁止加杠。
+- 暗杠/加杠/明杠检查牌墙、杠数、现有碰和手牌；海底不能杠（最后一张舍牌不能明杠），九种九牌只在自己的首次摸牌且此前无人鸣牌时开放。
+- 三种振听分别处理：舍牌振听由当前听牌与自己舍牌的交集动态计算；同巡振听在“后续事件证明本次荣和机会未被取用”后才落实，并在自己摸牌时清除；立直振听一旦错过荣和便持续到本局结束。振听禁止荣和，但不禁止自摸。14 张手牌的回合/宣言快照以摸切后（移除摸入牌）的听牌计算 `self.furiten`；吃碰后的 14 张快照没有固定听牌，只保留同巡/立直标志。荣和合法性只在 13 张响应快照上判断，因此不存在“选择切牌前的振听歧义”。
+- 规则驱动的 observation 历史包含当前触发事件，不包含未来事件；`RuleDecision` 放在 observation 外部，`Observation.to_dict()` 的键集与旧契约完全一致。
+- `match_event_action(event)` 只做记录事件到结构化动作的匹配，供验收和后续 sample 层使用；**不生成 pass 训练标签**。牌谱无法区分主动跳过与被其他行动截断的窗口保持未标注。
+
+本地验收使用现有 442 事件、5 局样例：225 个实际动作（切牌、鸣牌、立直宣言、和了）逐一映射到对应事件后的候选集合，全部匹配且唯一。样例共产生 277 个决策窗口（204 个 `turn`、62 个 `response`、7 个 `after_call`、4 个 `riichi_discard`）；其中 7 个响应窗口被实际吃/碰、3 个被实际荣和、52 个是合法的未取用吃碰杠窗口，未取用的荣和窗口为 0。新决策点总数大于 225，未取用窗口没有 pass 标签。旧 `iter_decision_points()` 的 225 点基线、`events.jsonl` 往返和 observation JSON 契约保持不变。本地 `tests/` 不纳入版本控制，交付验证只运行 `uv run pytest` 与 `uv run ruff check .`。
 
 ## 当前约定
 

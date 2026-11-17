@@ -35,11 +35,11 @@ class ObservationError(ValueError):
 
 @runtime_checkable
 class RulesState(Protocol):
-    """The slice of the reused rules engine that observation v1 consumes.
+    """The slice of the rules engine that observation v1 consumes.
 
-    The full rules engine is integrated later. Until then callers supply an
-    adapter for each decision; :class:`RulesSnapshot` is the minimal concrete
-    form used by tests and simple callers.
+    :class:`~suhou.rules.engine.PlayerRuleEngine` implements this protocol for
+    one viewer, so ``build_observation`` can consume real furiten. Callers that
+    only need an explicit constant use :class:`RulesSnapshot`.
     """
 
     def furiten(self, viewer: int) -> bool:

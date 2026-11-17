@@ -32,8 +32,10 @@ class RiichiState(StrEnum):
 class DecisionPhase(StrEnum):
     """Decision context supplied by the rules adapter.
 
-    These values are provisional until the reused rules engine defines its own
-    decision phases; the observation contract only requires a stable enum.
+    ``TURN``, ``AFTER_CALL``, ``RIICHI_DISCARD``, and ``KAN_RESPONSE`` are the
+    rule-driven contexts. ``DISCARD``/``RESPONSE``/``RIICHI``/``SELF_KAN``/
+    ``TSUMO`` remain for the compatibility extractor, which describes the
+    actual recorded action rather than the decision window.
     """
 
     DISCARD = "discard"
@@ -41,6 +43,10 @@ class DecisionPhase(StrEnum):
     RIICHI = "riichi"
     SELF_KAN = "self_kan"
     TSUMO = "tsumo"
+    TURN = "turn"
+    AFTER_CALL = "after_call"
+    RIICHI_DISCARD = "riichi_discard"
+    KAN_RESPONSE = "kan_response"
 
 
 @dataclass(frozen=True, slots=True)
