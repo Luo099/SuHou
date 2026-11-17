@@ -226,7 +226,11 @@ def parse_tenhou(path: str | Path) -> GameRecord:
         event = _parse_event(element, index)
         events.append(event)
         if event.tag == "UN":
-            players = _players(element)
+            # Later <UN> tags can be partial score updates without player names;
+            # only the initial roster carries n0..n3. Don't let a partial update
+            # overwrite the authoritative player list.
+            if all(f"n{seat}" in element.attrib for seat in range(4)):
+                players = _players(element)
         elif event.tag == "GO":
             try:
                 game_type = int(element.get("type", "0"))

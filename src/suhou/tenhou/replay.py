@@ -298,6 +298,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
             tuple(sorted((*meld.tiles, meld.called_tile))),
             meld.called_tile, (), meld.raw_mask,
         )
+        player.drawn = None
         round_.awaiting_replacement_draw = meld.caller
         round_.phase = "draw"
     elif meld.kind == "ankan":
@@ -305,6 +306,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
             raise ReplayError("Ankan requires the caller's drawn-tile turn")
         _remove_player_tiles(player, meld.consumed_tiles, "Ankan")
         player.melds.append(meld)
+        player.drawn = None
         round_.awaiting_replacement_draw = meld.caller
         round_.phase = "draw"
     elif meld.kind == "nuki":
@@ -312,6 +314,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
             raise ReplayError("Nuki requires the caller's drawn-tile turn")
         _remove_player_tiles(player, (meld.called_tile,), "Nuki")
         player.melds.append(meld)
+        player.drawn = None
         round_.awaiting_replacement_draw = meld.caller
         round_.phase = "draw"
     else:
@@ -492,10 +495,30 @@ def _apply_result(round_: RoundState, event: Event) -> str:
     round_.phase = "result"
     round_.pending_riichi = None
     if event.final_scores is not None and event.final_points is not None:
-        if tuple(round_.scores) != event.final_scores:
-            raise ReplayError(
-                f"owari scores {event.final_scores} differ from replay {round_.scores}"
+        expected_scores = list(round_.scores)
+        if event.tag == "RYUUKYOKU" and recorded_sticks:
+            # At game end, Tenhou awards riichi sticks still on the table to
+            # first place. The final <sc> omits this transfer, while <owari>
+            # includes it. Ties follow seat order (the log's first dealer is
+            # seat 0, so seat order is the tie-break).
+            first_place = max(
+                range(4), key=lambda seat: (expected_scores[seat], -seat)
             )
+            award = 1000 * recorded_sticks
+            expected_scores[first_place] += award
+            result["terminal_riichi_sticks"] = {
+                "seat": first_place,
+                "sticks": recorded_sticks,
+                "points": award,
+            }
+            round_.riichi_sticks = 0
+            message += f" | 终局供托 {award} 点归 P{first_place + 1}"
+        if tuple(expected_scores) != event.final_scores:
+            raise ReplayError(
+                f"owari scores {event.final_scores} differ from replay "
+                f"{tuple(expected_scores)}"
+            )
+        round_.scores = list(event.final_scores)
         round_.final_scores = event.final_scores
         round_.final_points = event.final_points
     return message
