@@ -11,7 +11,7 @@ from typing import Any
 from suhou.tenhou.melds import Meld, decode_meld
 from suhou.tenhou.models import Event, GameRecord
 from suhou.tenhou.parser import parse_tenhou
-from suhou.tenhou.tiles import WIND_NAMES, dora_from_indicator, tile_name
+from suhou.tenhou.tiles import Wind, dora_from_indicator, tile_name
 from suhou.tenhou.yaku import yaku_name
 
 
@@ -21,6 +21,8 @@ class ReplayError(ValueError):
 
 @dataclass(slots=True)
 class PlayerState:
+    seat: int = 0
+    dealer: int = 0
     initial_hand: tuple[int, ...] = ()
     hand: Counter[int] = field(default_factory=Counter)
     drawn: int | None = None
@@ -29,8 +31,15 @@ class PlayerState:
     riichi: str = "none"
     connected: bool = True
 
+    @property
+    def seat_wind(self) -> Wind:
+        """This seat's wind, relative to the hand's dealer."""
+        return Wind.for_seat(self.seat, self.dealer)
+
     def snapshot(self) -> dict[str, Any]:
         return {
+            "seat": self.seat,
+            "seat_wind": self.seat_wind.value,
             "initial_hand": [tile_name(tile) for tile in self.initial_hand],
             "hand": [tile_name(tile) for tile in sorted(self.hand.elements())],
             "drawn": tile_name(self.drawn) if self.drawn is not None else None,
@@ -75,7 +84,12 @@ class RoundState:
 
     @property
     def name(self) -> str:
-        return f"{WIND_NAMES[self.seed[0] // 4]}{self.seed[0] % 4 + 1}局"
+        return f"{self.round_wind.value}{self.seed[0] % 4 + 1}局"
+
+    @property
+    def round_wind(self) -> Wind:
+        """The hand's round wind, from the seed's 0..15 round index."""
+        return Wind.from_index(self.seed[0] // 4)
 
     @property
     def dice(self) -> tuple[int, int]:
@@ -90,6 +104,7 @@ class RoundState:
             "index": self.index,
             "name": self.name,
             "round_index": self.seed[0],
+            "round_wind": self.round_wind.value,
             "dealer": self.dealer,
             "honba": self.honba,
             "riichi_sticks": self.riichi_sticks,
@@ -196,7 +211,10 @@ def _start_round(state: _ReplayState, event: Event) -> RoundState:
         index=event.seed[0],
         seed=event.seed,
         dealer=event.oya,
-        players=[PlayerState(hand=Counter(hand), initial_hand=hand) for hand in hands],
+        players=[
+            PlayerState(seat=seat, dealer=event.oya, hand=Counter(hand), initial_hand=hand)
+            for seat, hand in enumerate(hands)
+        ],
         scores=list(event.scores),
         current_seat=event.oya,
         dora_indicators=[event.seed[5]],

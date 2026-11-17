@@ -1,7 +1,32 @@
 """Tenhou's physical tile identifiers and display names."""
 
+from __future__ import annotations
+
+from enum import StrEnum
+
 WIND_NAMES = ("东", "南", "西", "北")
 DRAGON_NAMES = ("白", "发", "中")
+
+
+class Wind(StrEnum):
+    """A mahjong wind, indexed by the 0..3 order 东南西北."""
+
+    EAST = "东"
+    SOUTH = "南"
+    WEST = "西"
+    NORTH = "北"
+
+    @classmethod
+    def from_index(cls, index: int) -> Wind:
+        return _WINDS[index % 4]
+
+    @classmethod
+    def for_seat(cls, seat: int, dealer: int) -> Wind:
+        """Seat wind relative to the dealer (0=dealer=East)."""
+        return cls.from_index((seat - dealer + 4) % 4)
+
+
+_WINDS = (Wind.EAST, Wind.SOUTH, Wind.WEST, Wind.NORTH)
 
 
 def validate_tile(tile: int) -> int:
