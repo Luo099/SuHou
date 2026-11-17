@@ -1,8 +1,11 @@
 """Immutable player-visible observation records.
 
 The field names mirror the Observation v1 contract. Physical tile IDs never
-appear here: :class:`Tile` keeps only the kind and the red-five flag, while the
-replay keeps the physical copies for flow checks.
+appear here: :class:`~suhou.domain.tiles.Tile` keeps only the kind and the
+red-five flag, while the replay keeps the physical copies for flow checks.
+
+The shared enums and the tile model live in ``suhou.domain`` and are re-exported
+here so existing observation imports keep working.
 """
 
 from __future__ import annotations
@@ -11,24 +14,12 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass
 from enum import StrEnum
-from types import MappingProxyType
 from typing import Any
 
-from suhou.tenhou.tiles import DRAGON_NAMES, WIND_NAMES, Wind, is_red_five, tile_kind
-
-_TILE_KINDS = tuple(
-    [f"{number}{suit}" for suit in "mps" for number in range(1, 10)]
-    + [*WIND_NAMES, *DRAGON_NAMES]
-)
-_TILE_KIND_ORDER = {kind: index for index, kind in enumerate(_TILE_KINDS)}
-_RED_FIVE_KINDS = frozenset({"5m", "5p", "5s"})
-
-
-class MatchType(StrEnum):
-    """The match length declared by the source game settings."""
-
-    TONPU = "tonpu"
-    HANCHAN = "hanchan"
+from suhou.domain.events import EventType, VisibleEvent
+from suhou.domain.tiles import Tile, Wind
+from suhou.domain.types import MatchType, MeldType
+from suhou.domain.values import freeze_value as freeze_payload
 
 
 class RiichiState(StrEnum):
@@ -36,14 +27,6 @@ class RiichiState(StrEnum):
     PENDING = "pending"
     DECLARED = "declared"
     ACCEPTED = "accepted"
-
-
-class MeldType(StrEnum):
-    CHI = "chi"
-    PON = "pon"
-    MINKAN = "minkan"
-    ANKAN = "ankan"
-    KAKAN = "kakan"
 
 
 class DecisionPhase(StrEnum):
@@ -58,50 +41,6 @@ class DecisionPhase(StrEnum):
     RIICHI = "riichi"
     SELF_KAN = "self_kan"
     TSUMO = "tsumo"
-
-
-class EventType(StrEnum):
-    ROUND_START = "round_start"
-    DRAW = "draw"
-    DISCARD = "discard"
-    CALL = "call"
-    RIICHI_DECLARATION = "riichi_declaration"
-    RIICHI_ACCEPTED = "riichi_accepted"
-    DORA = "dora"
-    RESULT = "result"
-    CONNECTION = "connection"
-
-
-@dataclass(frozen=True, slots=True)
-class Tile:
-    """A tile kind plus its red-five identity, without a physical copy ID."""
-
-    kind: str
-    red: bool = False
-
-    def __post_init__(self) -> None:
-        if self.kind not in _TILE_KIND_ORDER:
-            raise ValueError(f"Unknown tile kind: {self.kind!r}")
-        if self.red and self.kind not in _RED_FIVE_KINDS:
-            raise ValueError(f"Only 5m/5p/5s can be red, got {self.kind!r}")
-
-    @classmethod
-    def from_physical(cls, tile: int) -> Tile:
-        """Build a red-five-aware tile from a Tenhou physical ID."""
-        return cls(tile_kind(tile), is_red_five(tile))
-
-    @property
-    def sort_key(self) -> tuple[int, int]:
-        """Suit/kind order, then red before the ordinary copy."""
-        return (_TILE_KIND_ORDER[self.kind], 0 if self.red else 1)
-
-    @property
-    def name(self) -> str:
-        """Display form; red fives use Tenhou's ``0m``/``0p``/``0s``."""
-        return f"0{self.kind[1]}" if self.red else self.kind
-
-    def __str__(self) -> str:
-        return self.name
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,36 +154,6 @@ class DecisionContext:
             raise ValueError("trigger_seq must be non-negative")
 
 
-def freeze_payload(value: Any) -> Any:
-    """Recursively make event payloads immutable."""
-    if isinstance(value, Mapping):
-        return MappingProxyType({key: freeze_payload(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(freeze_payload(item) for item in value)
-    return value
-
-
-@dataclass(frozen=True, slots=True)
-class VisibleEvent:
-    seq: int
-    type: EventType
-    actor: int | None
-    data: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        if self.seq < 0:
-            raise ValueError("event seq must be non-negative")
-        if self.actor is not None and not 0 <= self.actor < 4:
-            raise ValueError(f"actor must be in 0..3, got {self.actor}")
-        object.__setattr__(self, "data", freeze_payload(self.data))
-
-    def __copy__(self) -> VisibleEvent:
-        return self
-
-    def __deepcopy__(self, memo: dict[int, Any]) -> VisibleEvent:
-        return self
-
-
 @dataclass(frozen=True, slots=True)
 class Observation:
     viewer: int
@@ -301,3 +210,24 @@ def to_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [to_jsonable(item) for item in value]
     return value
+
+
+__all__ = [
+    "DecisionContext",
+    "DecisionPhase",
+    "Discard",
+    "EventType",
+    "MatchType",
+    "Meld",
+    "MeldType",
+    "Observation",
+    "PlayerObservation",
+    "RiichiState",
+    "SelfObservation",
+    "TableObservation",
+    "Tile",
+    "VisibleEvent",
+    "Wind",
+    "freeze_payload",
+    "to_jsonable",
+]

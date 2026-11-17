@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from suhou.domain.codec import event_json
 from suhou.tenhou.replay import ReplayResult, ReplayStep
 
 
@@ -15,6 +16,11 @@ def replay_json(result: ReplayResult) -> str:
         json.dumps(step.snapshot, ensure_ascii=False, allow_nan=False, sort_keys=True) + "\n"
         for step in result.steps
     )
+
+
+def events_json(result: ReplayResult) -> str:
+    """Serialize the versioned internal events for ``replay_events``."""
+    return "".join(event_json(event) + "\n" for event in result.events)
 
 
 def _format_line(step: ReplayStep) -> str:
@@ -40,11 +46,14 @@ def replay_text(result: ReplayResult) -> str:
 
 
 def write_replay(result: ReplayResult, directory: str | Path) -> Path:
-    """Write the same replay in JSONL, readable text, and final summary forms."""
+    """Write the replay in JSONL, readable text, summary, and event-stream forms."""
     output = Path(directory)
     output.mkdir(parents=True, exist_ok=True)
     (output / "replay.jsonl").write_text(replay_json(result), encoding="utf-8", newline="\n")
     (output / "replay.log").write_text(replay_text(result), encoding="utf-8", newline="\n")
+    (output / "events.jsonl").write_text(
+        events_json(result), encoding="utf-8", newline="\n"
+    )
     (output / "summary.json").write_text(
         json.dumps(result.summary(), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

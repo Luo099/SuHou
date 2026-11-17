@@ -39,9 +39,42 @@ SuHou/
 ├── data/         牌谱与转换后的数据（不提交到 Git）
 ├── artifacts/    模型检查点、日志和评估结果（不提交到 Git）
 ├── scripts/      一次性脚本与实验入口
-├── src/suhou/    Python 包
+├── src/suhou/
+│   ├── domain/   通用麻将类型、统一事件、状态视图与可见性投影
+│   ├── replay/   通用重放引擎与 events.jsonl 读写
+│   ├── tenhou/   天凤 XML 解析、协议适配与兼容入口
+│   └── observation/  Observation v1 构造与提取
 ├── tests/        自动化测试
 └── pyproject.toml
+```
+
+## 统一事件流
+
+天凤标签只在 `src/suhou/tenhou/` 内解释，之后统一成同步、确定顺序的内部事件：
+
+```text
+Parser(TenhouEvent) -> TenhouAdapter -> 不可变 GameEvent
+    -> 捕获事件前状态视图 -> ReplayEngine.apply() -> 可见历史/审计输出
+```
+
+- `TenhouEvent`：原始 XML 子节点、属性与顺序，仅用于解析、适配和原始审计；旧名 `Event` 仍可用。
+- `GameEvent`：已经发生的麻将行为，带 `schema_version=1`、`source_index`、`round_id`、局内 `seq`、`actor` 和按事件种类区分的 payload。牌保留实体编号。
+- 事件种类：`metadata`、`round_start`、`draw`、`discard`、`call`、`riichi_declaration`、`riichi_accepted`、`dora`、`result`、`connection`。
+- `round_id` 是第几次 `INIT`（从 0 开始），连庄时与 `seed[0]` 相同但 `round_id` 不同。`seq` 是局内源事件序号，`INIT` 为 0；局内元数据不占 `seq`，因此序号可以有间隔。
+- `ReplayEngine` 是唯一修改牌局状态的模块，不依赖 XML 标签、属性字典或副露位编码。适配器只读取不可变的 `RoundView` 计算上下文（摸切、岭上摸牌、立直宣言牌、加杠对应的原碰）。
+- 连续和了记录共享 `result_group_id`，最后一条标记结算组结束；分数按源顺序逐条应用，整局只关闭一次。结果相关观测使用结算组开始前冻结的状态和历史截止位置。
+- `project_visible(event, viewer, red_fives=...)` 采用字段白名单投影。他家摸牌没有牌张、起手事件只有观察者自己的手牌、和了手牌/役种/里宝牌不进入可见历史。赤五标记按 `<GO type>` 规则位解释。
+- `iter_replay(source)` 按源顺序产出不可变的 `ReplayFrame`（事件、前后状态视图、消息）；`replay_events(events)` 直接重放内部事件流；`read_event_stream`/`write_event_stream` 读写 `events.jsonl`。
+
+```python
+from suhou.replay import read_event_stream, replay_events
+from suhou.tenhou import iter_replay
+
+for frame in iter_replay("data/raw/tenhou/sample.mjlog"):
+    print(frame.event.kind, frame.message)
+
+outcome = replay_events(read_event_stream("artifacts/tenhou/sample/events.jsonl"))
+print(outcome.final_scores)
 ```
 
 ## 天凤牌谱重放
@@ -59,6 +92,9 @@ uv run python -m suhou tenhou-replay \
 - `replay.jsonl`：每个原始事件一行，含事件序号、原标签/属性、规范化动作和执行后的完整牌局状态；和了记录展开符数、飜数、点数、役种、和了牌及宝牌。
 - `replay.log`：与 JSONL 相同事件顺序的中文可读动作日志，和了行可直接对照官方结算页。
 - `summary.json`：玩家、局数、最终持有分数和场分。
+- `events.jsonl`：带 `schema_version=1` 的统一内部事件，一条源事件一行，可用 `read_event_stream()` 重新载入并交给 `replay_events()` 确定性重放。
+
+`replay_tenhou()` 是统一引擎的兼容包装，保留原有 `ReplayResult` 接口、逐源事件的 `replay.jsonl` 审计和 `before_event` 源事件回调（回调拿到的是不可变 `RoundView`）；新代码优先使用 `iter_replay()`。
 
 `--step N` 仅将终端打印限制到第 N 个事件（从 0 开始）；文件始终覆盖整场牌局。程序验证实体牌副本、行动者、副露来源、立直两阶段、和了手牌/副露/宝牌、各局分数连续性及最终 `owari`，并支持四人牌谱中的吃、碰、明杠、暗杠、加杠、和了和流局记录。状态快照同时给出每家舍牌、手牌、副露、立直阶段、牌墙余数和供托。
 
@@ -68,7 +104,7 @@ uv run python -m suhou tenhou-replay \
 
 内部点数统一为“点”；XML 的 `ten`、`sc` 是 100 点单位，`owari` 的场分是独立的小数值。程序忠实重放牌谱并展示记录中的役种，不自行计算役种/和了点数。天凤官方读谱仅用于验收时的正确性对照，不属于程序交付功能或运行依赖。
 
-重放状态中的舍牌和副露额外保留内部字段：舍牌带 `tile_id`/`seq`，副露带 `formed_seq`/`updated_seq`/`added_tile`。加杠的 `called_tile` 是原来碰入的牌，`added_tile` 是加杠追加的牌，二者不再混为同一个字段。这些字段用于观察构造和牌张流转检查，不进入 observation。
+重放状态中的舍牌和副露额外保留内部字段：舍牌带 `tile_id`/`seq`，副露带 `formed_seq`/`updated_seq`/`added_tile`。加杠的 `called_tile` 是原来碰入的牌，`added_tile` 是加杠追加的牌，二者不再混为同一个字段。这些字段用于观察构造和牌张流转检查，不进入 observation。每局快照另带 `round_id`（连庄可区分）；结果记录带 `group_id`（同一次多家和了共享）。和了/流局结果不再重复保存整份原始属性，原始属性始终在每行的 `event.attributes` 中通过 `source_index` 追溯。
 
 本地 `tests/` 目录已加入 `.gitignore`，仅用于开发验证，不纳入版本控制。
 
@@ -93,15 +129,16 @@ print(observation.to_dict())
 ```
 
 - observation 包含 `viewer`、`table`、`self`、`players`、`context`、`history`。`players` 始终按绝对座位 0..3 排列；`self` 只给出当前观察者的手牌、摸入牌和振听。
-- 牌张使用 `Tile(kind, red)` 表示，赤五保留为 `5m/5p/5s + red=True`，不包含实体牌编号。手牌按牌种、赤牌标记排序（同牌种赤牌在前）；舍牌、副露和历史按发生顺序排列。
-- `build_observation(replay_state, rules_state, visible_history, viewer, decision_context)` 逐字段读取当前重放状态，返回不可变快照。它不读取对手手牌内容、对手摸入牌、里宝牌或结算内部字段。
-- `history` 是本局开始到本次决策前的可见事件前缀。自己的起手牌和摸牌有实际牌张，对手摸牌只有 `tile=None`；对手的起手牌不会出现在历史里。后续鸣牌只追加新事件，不回写旧样本。
-- `seq` 是局内源事件序号，每局从 `INIT` 的 0 重新开始；舍牌和副露的 `seq` 与历史事件一致。`trigger_seq` 是触发本次决策的摸牌/舍牌/鸣牌事件。
-- `table.match_type` 从天凤 `<GO type>` 规则位解出（`0x08` 为半庄，`0x10` 为三麻）。当前样例 `type=1` 是东风战；它在东4局无人达到 30000 点后南入到南1局，因此 `match_type` 为 `tonpu`，不是半庄。
-- `DecisionPhase` 目前由提取层按源事件给出（`discard`/`response`/`riichi`/`self_kan`/`tsumo`），属于规则引擎接入前的临时适配。合法动作集合、动作掩码和实际动作标签不放进 observation，仍留给 sample 层。
-- `RulesState` 目前只要求 `furiten(viewer)`。真实振听、临时振听和立直振听必须由复用的规则引擎提供；`RulesSnapshot` 没有默认值，上面显式传入的四家 `False` 只是占位，不能当成规则结果。
-- `iter_decision_points` 是逐实际动作截取 observation 的便捷入口，内部通过 `replay_tenhou(..., before_event=...)` 在事件执行前取数。它不会为未记录的“跳过鸣牌/跳过荣和”补样本；立直宣言与随后的舍牌是两个源事件，会各自产生一个 decision point，sample 层可按需合并。
+- 牌张使用 `Tile(kind, red)` 表示，赤五保留为 `5m/5p/5s + red=True`，不包含实体牌编号；无赤牌规则的对局按 `<GO type>` 解释为 `red=False`。手牌按牌种、赤牌标记排序（同牌种赤牌在前）；舍牌、副露和历史按发生顺序排列。
+- `build_observation(replay_state, rules_state, visible_history, viewer, decision_context)` 逐字段读取当前状态（`RoundState` 或不可变 `RoundView`），返回不可变快照。它不读取对手手牌内容、对手摸入牌、里宝牌或结算内部字段。
+- `history` 是本局开始到本次决策前的可见事件前缀，由 `project_visible()` 从统一事件白名单投影得到。自己的起手牌和摸牌有实际牌张，对手摸牌只有 `tile=None`；对手的起手牌不会出现在历史里。后续鸣牌只追加新事件，不回写旧样本。
+- `seq` 是局内源事件序号，每局从 `INIT` 的 0 重新开始；局内元数据不占序号，因此舍牌和副露的 `seq` 可以有间隔，但始终严格递增。`trigger_seq` 是触发本次决策的摸牌/舍牌/鸣牌事件。
+- `table.match_type` 由天凤适配器从 `<GO type>` 规则位一次性解出并保存在状态中；`0x08` 为半庄，`0x10` 为三麻（Observation v1 拒绝三麻）。当前样例 `type=1` 是东风战；它在东4局无人达到 30000 点后南入到南1局，因此 `match_type` 为 `tonpu`，不是半庄。
+- `DecisionPhase` 目前由提取层按统一事件给出（`discard`/`response`/`riichi`/`self_kan`/`tsumo`），属于规则引擎接入前的临时适配。合法动作集合、动作掩码和实际动作标签不放进 observation，仍留给 sample 层。
+- `RulesState` 目前只要求 `furiten(viewer)`。真实振听、临时振听和立直振听必须由复用的规则引擎提供；`RulesSnapshot` 没有默认值，上面显式传入的四家 `False` 只是占位，不能当成规则结果。新的 rules factory 接收 `(RoundView, GameEvent, viewer)`；仍检查天凤源事件的旧 factory 需用 `legacy_rules_state_factory()` 显式包装。
+- `iter_decision_points` 是逐实际动作截取 observation 的便捷入口，内部使用 `iter_replay()` 的不可变帧，在事件执行前取数。它不会为未记录的“跳过鸣牌/跳过荣和”补样本；立直宣言与随后的舍牌是两个源事件，会各自产生一个 decision point，sample 层可按需合并。多条和了共享一个 decision 状态：所有结果观测都使用结算组开始前的状态与历史截止位置。
 - `DecisionPoint` 额外带 `round_ordinal`（局实例序号，连庄时同一 `seed[0]` 仍可区分）、`event_seq`（历史截止位置）和源事件标识。这些是审计/落盘字段，不属于 observation 契约。
+- `EventType`、`Tile`、`MatchType`、`MeldType` 等通用类型定义在 `suhou.domain`，旧的 `suhou.observation` 导入路径继续可用。
 
 ## 当前约定
 

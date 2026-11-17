@@ -1,9 +1,9 @@
-"""Per-round visible event history with viewer filtering.
+"""Visible event history.
 
-The full round sequence is kept once. A sample stores only the observer and the
-cutoff position, and :meth:`RoundHistory.view` regenerates the visible prefix.
-This is the storage optimisation allowed by the Observation v1 contract; the
-resulting observation content is unchanged.
+New consumers append unified :class:`GameEvent` records and call
+:func:`~suhou.domain.visibility.project_visible` through :class:`EventHistory`.
+The older :class:`HistoryEntry`/:class:`RoundHistory` pair remains as a
+compatibility wrapper for callers that already store redactable payloads.
 """
 
 from __future__ import annotations
@@ -12,11 +12,63 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from suhou.domain.events import GameEvent
+from suhou.domain.visibility import project_visible
 from suhou.observation.model import (
     EventType,
     VisibleEvent,
     freeze_payload,
 )
+
+
+class EventHistory:
+    """Append-only unified events for one round; projections are per viewer."""
+
+    __slots__ = ("_events", "_red_fives")
+
+    def __init__(self, *, red_fives: bool = True) -> None:
+        self._events: list[GameEvent] = []
+        self._red_fives = red_fives
+
+    def __len__(self) -> int:
+        return len(self._events)
+
+    @property
+    def events(self) -> tuple[GameEvent, ...]:
+        return tuple(self._events)
+
+    def append(self, event: GameEvent) -> None:
+        if event.seq is None:
+            raise ValueError("history events must be round-local")
+        if self._events and event.seq <= self._events[-1].seq:
+            raise ValueError(
+                f"history seq must increase, got {event.seq} after "
+                f"{self._events[-1].seq}"
+            )
+        self._events.append(event)
+
+    def view(self, viewer: int, cutoff: int | None = None) -> tuple[VisibleEvent, ...]:
+        """Return visible events with ``seq < cutoff`` for ``viewer``."""
+        if not 0 <= viewer < 4:
+            raise ValueError(f"viewer must be in 0..3, got {viewer}")
+        if cutoff is not None and cutoff < 0:
+            raise ValueError("cutoff must be non-negative")
+        visible: list[VisibleEvent] = []
+        for event in self._events:
+            assert event.seq is not None
+            if cutoff is not None and event.seq >= cutoff:
+                continue
+            projected = project_visible(
+                event, viewer, red_fives=self._red_fives
+            )
+            if projected is not None:
+                visible.append(projected)
+        return tuple(visible)
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> EventHistory:
+        clone = EventHistory(red_fives=self._red_fives)
+        clone._events = list(self._events)
+        return clone
 
 
 @dataclass(frozen=True, slots=True)

@@ -9,31 +9,24 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
+from suhou.domain.melds import Meld as ReplayMeld
+from suhou.domain.state import DiscardRecord, RoundState, RoundView
+from suhou.domain.tiles import Tile
+from suhou.domain.types import MatchType, MeldType
+from suhou.domain.types import match_type_from_game_type as _match_type
 from suhou.observation.model import (
     DecisionContext,
     Discard,
-    MatchType,
     Meld,
-    MeldType,
     Observation,
     PlayerObservation,
     RiichiState,
     SelfObservation,
     TableObservation,
-    Tile,
     VisibleEvent,
 )
-from suhou.tenhou.melds import Meld as ReplayMeld
-from suhou.tenhou.replay import RoundState
-
-# Tenhou <GO type> rule bits (community protocol knowledge): 0x01 vs human,
-# 0x02 no red fives, 0x04 no kuitan, 0x08 hanchan, 0x10 sanma, 0x40 soku.
-# The bundled sample has type=1 (tonpu); it reaches 南1 through 南入 because
-# nobody had 30000 at the end of 東4.
-_GO_HANCHAN = 0x08
-_GO_SANMA = 0x10
 
 
 class ObservationError(ValueError):
@@ -75,21 +68,37 @@ class RulesSnapshot:
 
 
 def match_type_from_game_type(game_type: int | None) -> MatchType:
-    """Decode tonpu/hanchan from the source's <GO type> rule bits."""
-    if game_type is None:
-        raise ObservationError(
-            "Cannot determine tonpu/hanchan: the game has no <GO type> rule bits"
+    """Legacy re-export of the single rule-bit decoder.
+
+    New code reads ``RoundState.match_type``; this wrapper exists so older
+    callers keep the ``ObservationError`` type.
+    """
+    try:
+        return _match_type(game_type)
+    except ValueError as error:
+        raise ObservationError(str(error)) from error
+
+
+def _tile(tile: int, red_fives: bool = True) -> Tile:
+    return Tile.from_physical(tile, red_fives)
+
+
+def _hand_tiles(hand: Iterable[int] | Any) -> Iterable[int]:
+    elements = getattr(hand, "elements", None)
+    return elements() if elements is not None else hand
+
+
+def _discard(
+    record: DiscardRecord | dict[str, Any], red_fives: bool
+) -> Discard:
+    if isinstance(record, DiscardRecord):
+        return Discard(
+            tile=_tile(record.tile, red_fives),
+            tsumogiri=record.tsumogiri,
+            riichi_declaration=record.riichi,
+            called_by=record.called_by,
+            seq=record.seq,
         )
-    if game_type & _GO_SANMA:
-        raise ObservationError("Three-player logs are outside Observation v1")
-    return MatchType.HANCHAN if game_type & _GO_HANCHAN else MatchType.TONPU
-
-
-def _tile(tile: int) -> Tile:
-    return Tile.from_physical(tile)
-
-
-def _discard(record: dict[str, object]) -> Discard:
     try:
         tile_id = record["tile_id"]
         seq = record["seq"]
@@ -107,7 +116,7 @@ def _discard(record: dict[str, object]) -> Discard:
     if called_by is not None and not isinstance(called_by, int):
         raise ObservationError("Replay discard called_by must be an integer or None")
     return Discard(
-        tile=_tile(tile_id),
+        tile=_tile(tile_id, red_fives),
         tsumogiri=bool(tsumogiri),
         riichi_declaration=bool(riichi),
         called_by=called_by,
@@ -115,7 +124,7 @@ def _discard(record: dict[str, object]) -> Discard:
     )
 
 
-def _meld(meld: ReplayMeld) -> Meld:
+def _meld(meld: ReplayMeld, red_fives: bool) -> Meld:
     if meld.kind == "nuki":
         raise ObservationError("Nuki (three-player) is outside Observation v1")
     try:
@@ -126,7 +135,7 @@ def _meld(meld: ReplayMeld) -> Meld:
         raise ObservationError(
             "Replay meld lacks sequence numbers; rebuild with the current replay"
         )
-    if kind == MeldType.ANKAN:
+    if kind is MeldType.ANKAN:
         source = None
         called = None
         added = None
@@ -134,13 +143,13 @@ def _meld(meld: ReplayMeld) -> Meld:
         if meld.called_tile is None:
             raise ObservationError(f"{kind} lacks a called tile in replay state")
         source = meld.from_seat
-        called = _tile(meld.called_tile)
-        added = _tile(meld.added_tile) if kind == MeldType.KAKAN else None
-        if kind == MeldType.KAKAN and meld.added_tile is None:
+        called = _tile(meld.called_tile, red_fives)
+        added = _tile(meld.added_tile, red_fives) if kind is MeldType.KAKAN else None
+        if kind is MeldType.KAKAN and meld.added_tile is None:
             raise ObservationError("Kakan lacks its added tile in replay state")
     return Meld(
         type=kind,
-        tiles=tuple(_tile(tile) for tile in meld.tiles),
+        tiles=tuple(_tile(tile, red_fives) for tile in meld.tiles),
         source_player=source,
         called_tile=called,
         added_tile=added,
@@ -149,12 +158,28 @@ def _meld(meld: ReplayMeld) -> Meld:
     )
 
 
-def _hand(tiles: Iterable[int]) -> tuple[Tile, ...]:
-    return tuple(sorted((_tile(tile) for tile in tiles), key=lambda tile: tile.sort_key))
+def _hand(tiles: Iterable[int], red_fives: bool) -> tuple[Tile, ...]:
+    return tuple(
+        sorted(
+            (_tile(tile, red_fives) for tile in tiles),
+            key=lambda tile: tile.sort_key,
+        )
+    )
+
+
+def _match_type_of(replay_state: RoundState | RoundView) -> MatchType:
+    match_type = replay_state.match_type
+    if match_type is None:
+        if getattr(replay_state, "game_type", None) is not None:
+            raise ObservationError("Three-player logs are outside Observation v1")
+        raise ObservationError(
+            "Cannot determine tonpu/hanchan: the game has no <GO type> rule bits"
+        )
+    return match_type
 
 
 def build_observation(
-    replay_state: RoundState,
+    replay_state: RoundState | RoundView,
     rules_state: RulesState,
     visible_history: Sequence[VisibleEvent],
     viewer: int,
@@ -163,37 +188,46 @@ def build_observation(
     """Capture the current player's visible table before the decision acts.
 
     ``visible_history`` must already be the viewer-filtered prefix ending just
-    before the decision event (see :meth:`RoundHistory.view`). All returned
-    records are independent copies; later replay mutations do not affect them.
+    before the decision event. All returned records are independent copies;
+    later replay mutations do not affect them.
     """
     if not 0 <= viewer < 4:
         raise ObservationError(f"viewer must be in 0..3, got {viewer}")
 
+    red_fives = getattr(replay_state, "red_fives", True)
     me = replay_state.players[viewer]
-    hand = _hand(me.hand.elements())
-    drawn_tile = _tile(me.drawn) if me.drawn is not None else None
+    hand = _hand(_hand_tiles(me.hand), red_fives)
+    drawn_tile = _tile(me.drawn, red_fives) if me.drawn is not None else None
     if drawn_tile is not None and drawn_tile not in hand:
         raise ObservationError("Replay drawn tile is not present in the current hand")
 
     table = TableObservation(
-        match_type=match_type_from_game_type(replay_state.game_type),
+        match_type=_match_type_of(replay_state),
         round_wind=replay_state.round_wind,
         hand_number=replay_state.seed[0] % 4 + 1,
         honba=replay_state.honba,
         riichi_sticks=replay_state.riichi_sticks,
         dealer=replay_state.dealer,
         remaining_tiles=replay_state.wall_remaining,
-        dora_indicators=tuple(_tile(tile) for tile in replay_state.dora_indicators),
+        dora_indicators=tuple(
+            _tile(tile, red_fives) for tile in replay_state.dora_indicators
+        ),
     )
 
     players = tuple(
         PlayerObservation(
             seat_wind=player.seat_wind,
             score=replay_state.scores[seat],
-            concealed_tile_count=sum(player.hand.values()),
+            concealed_tile_count=(
+                sum(player.hand.values())
+                if hasattr(player.hand, "values")
+                else len(player.hand)
+            ),
             riichi=_riichi(player.riichi, seat),
-            discards=tuple(_discard(record) for record in player.discards),
-            melds=tuple(_meld(meld) for meld in player.melds),
+            discards=tuple(
+                _discard(record, red_fives) for record in player.discards
+            ),
+            melds=tuple(_meld(meld, red_fives) for meld in player.melds),
         )
         for seat, player in enumerate(replay_state.players)
     )

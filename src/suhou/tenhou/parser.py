@@ -8,9 +8,8 @@ import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import MappingProxyType
-from urllib.parse import unquote
 
-from suhou.tenhou.models import Event, GameRecord, Player
+from suhou.tenhou.models import GameRecord, Player, TenhouEvent, players_from_attributes
 from suhou.tenhou.tiles import validate_tile
 
 _DRAW_SEATS = dict(zip("TUVW", range(4), strict=True))
@@ -56,35 +55,6 @@ def _score_pairs(
     )
 
 
-def _players(element: ET.Element) -> tuple[Player, Player, Player, Player]:
-    names = [unquote(element.get(f"n{seat}", ""), encoding="utf-8") for seat in range(4)]
-
-    def optional_values(name: str) -> list[str | None]:
-        raw = element.get(name)
-        if raw is None:
-            return [None] * 4
-        values = raw.split(",")
-        if len(values) != 4:
-            raise TenhouParseError(f"<UN> '{name}' must contain four comma-separated values")
-        return values
-
-    dan = optional_values("dan")
-    rate = optional_values("rate")
-    sex = optional_values("sx")
-    try:
-        return tuple(
-            Player(
-                names[seat],
-                int(dan[seat]) if dan[seat] not in (None, "") else None,
-                float(rate[seat]) if rate[seat] not in (None, "") else None,
-                sex[seat],
-            )
-            for seat in range(4)
-        )
-    except ValueError as error:
-        raise TenhouParseError("<UN> has invalid player rank/rate") from error
-
-
 def _final_result(
     element: ET.Element,
 ) -> tuple[tuple[int, int, int, int], tuple[float, ...]] | None:
@@ -103,7 +73,7 @@ def _final_result(
         raise TenhouParseError(f"<{element.tag}> has invalid 'owari'") from error
 
 
-def _parse_event(element: ET.Element, index: int) -> Event:
+def _parse_event(element: ET.Element, index: int) -> TenhouEvent:
     tag = element.tag
     match = _TILE_TAG.fullmatch(tag)
     attributes = MappingProxyType(dict(element.attrib))
@@ -115,7 +85,7 @@ def _parse_event(element: ET.Element, index: int) -> Event:
             common.update(tag="T" if prefix.upper() in _DRAW_SEATS else "D", seat=seat)
             if seat is None:
                 raise TenhouParseError(f"Unsupported tile event <{tag}>")
-            return Event(tile=validate_tile(int(raw_tile)), **common)
+            return TenhouEvent(tile=validate_tile(int(raw_tile)), **common)
         if tag not in _KNOWN_TAGS:
             raise TenhouParseError(f"Unsupported Tenhou tag <{tag}>")
         if tag == "INIT":
@@ -132,7 +102,7 @@ def _parse_event(element: ET.Element, index: int) -> Event:
             all_tiles = tuple(tile for hand in hands for tile in hand)
             if len(set(all_tiles)) != 52:
                 raise TenhouParseError("<INIT> physical tile copies must be unique")
-            return Event(
+            return TenhouEvent(
                 tag=tag,
                 seed=seed,
                 oya=oya,
@@ -148,7 +118,10 @@ def _parse_event(element: ET.Element, index: int) -> Event:
             mask = int(element.get("m", "-1"))
             from suhou.tenhou.melds import decode_meld
             decoded = decode_meld(seat, mask)
-            return Event(tag=tag, seat=seat, meld=mask, tiles=decoded.tiles, **common)
+            return TenhouEvent(
+                tag=tag, seat=seat, meld=mask, tiles=decoded.tiles,
+                meld_record=decoded, **common,
+            )
         if tag == "REACH":
             seat = int(element.get("who", "-1"))
             step = int(element.get("step", "-1"))
@@ -157,14 +130,14 @@ def _parse_event(element: ET.Element, index: int) -> Event:
             scores = None
             if "ten" in element.attrib:
                 scores = tuple(value * 100 for value in _int_values(element, "ten", 4))
-            return Event(tag=tag, seat=seat, step=step, scores=scores, **common)
+            return TenhouEvent(tag=tag, seat=seat, step=step, scores=scores, **common)
         if tag == "DORA":
-            return Event(tag=tag, tile=validate_tile(int(element.get("hai", "-1"))), **common)
+            return TenhouEvent(tag=tag, tile=validate_tile(int(element.get("hai", "-1"))), **common)
         if tag in ("BYE", "RESUME"):
             seat = int(element.get("who", "-1"))
             if not 0 <= seat < 4:
                 raise TenhouParseError(f"<{tag}> who must be in 0..3")
-            return Event(tag=tag, seat=seat, **common)
+            return TenhouEvent(tag=tag, seat=seat, **common)
         if tag in ("AGARI", "RYUUKYOKU"):
             scores_before, deltas = _score_pairs(element)
             final = _final_result(element)
@@ -175,7 +148,7 @@ def _parse_event(element: ET.Element, index: int) -> Event:
                 if not 0 <= who < 4 or not 0 <= from_who < 4:
                     raise TenhouParseError("<AGARI> who/fromWho must be in 0..3")
                 winners = ((who, from_who),)
-            return Event(
+            return TenhouEvent(
                 tag=tag,
                 scores_before=scores_before,
                 deltas=deltas,
@@ -185,7 +158,7 @@ def _parse_event(element: ET.Element, index: int) -> Event:
                 draw_type=element.get("type") if tag == "RYUUKYOKU" else None,
                 **common,
             )
-        return Event(tag=tag, **common)
+        return TenhouEvent(tag=tag, **common)
     except (ValueError, TypeError) as error:
         if isinstance(error, TenhouParseError):
             raise TenhouParseError(f"Event {index} <{tag}>: {error}") from error
@@ -216,7 +189,7 @@ def parse_tenhou(path: str | Path) -> GameRecord:
     if root.tag != "mjloggm" or root.get("ver") != "2.3":
         raise TenhouParseError("Expected <mjloggm ver=\"2.3\"> root element")
 
-    events: list[Event] = []
+    events: list[TenhouEvent] = []
     players: tuple[Player, Player, Player, Player] | None = None
     game_type: int | None = None
     lobby: int | None = None
@@ -230,7 +203,10 @@ def parse_tenhou(path: str | Path) -> GameRecord:
             # only the initial roster carries n0..n3. Don't let a partial update
             # overwrite the authoritative player list.
             if all(f"n{seat}" in element.attrib for seat in range(4)):
-                players = _players(element)
+                try:
+                    players = players_from_attributes(element.attrib)
+                except ValueError as error:
+                    raise TenhouParseError(f"Event {index} <UN>: {error}") from error
         elif event.tag == "GO":
             try:
                 game_type = int(element.get("type", "0"))

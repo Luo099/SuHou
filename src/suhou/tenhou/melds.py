@@ -1,34 +1,14 @@
-"""Decode Tenhou's N.m bit field into physical tiles and seat relations."""
+"""Decode Tenhou's N.m bit field into physical tiles and seat relations.
+
+This is the only place that interprets the call encoding. The decoded
+:class:`~suhou.domain.melds.Meld` record is shared with the event stream, the
+replay engine, and observation.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal
-
-from suhou.tenhou.tiles import tile_name
-
-MeldKind = Literal["chi", "pon", "minkan", "ankan", "kakan", "nuki"]
-
-
-@dataclass(frozen=True, slots=True)
-class Meld:
-    caller: int
-    kind: MeldKind
-    from_seat: int
-    tiles: tuple[int, ...]
-    called_tile: int
-    consumed_tiles: tuple[int, ...]
-    raw_mask: int
-    # The tile added by a later kakan. A kakan keeps the original pon's
-    # source and called tile, so the two events stay distinguishable.
-    added_tile: int | None = None
-    # Round-local visible event sequence numbers, filled in by the replay.
-    formed_seq: int | None = None
-    updated_seq: int | None = None
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return tuple(tile_name(tile) for tile in self.tiles)
+from suhou.domain.melds import Meld
+from suhou.domain.types import MeldKind
 
 
 def decode_meld(caller: int, mask: int) -> Meld:
@@ -51,7 +31,7 @@ def decode_meld(caller: int, mask: int) -> Meld:
         tiles = tuple((suit * 9 + rank + offset) * 4 + copies[offset] for offset in range(3))
         called = tiles[called_index]
         consumed = tuple(tile for index, tile in enumerate(tiles) if index != called_index)
-        return Meld(caller, "chi", from_seat, tiles, called, consumed, mask)
+        return Meld(caller, MeldKind.CHI, from_seat, tiles, called, consumed, mask)
 
     if mask & 0x0018:
         unused_copy = (mask & 0x0060) >> 5
@@ -66,10 +46,12 @@ def decode_meld(caller: int, mask: int) -> Meld:
                 raise ValueError(f"Pon must call another player's tile: mask={mask}")
             called = triplet[called_index]
             consumed = tuple(tile for index, tile in enumerate(triplet) if index != called_index)
-            return Meld(caller, "pon", from_seat, triplet, called, consumed, mask)
+            return Meld(caller, MeldKind.PON, from_seat, triplet, called, consumed, mask)
         if mask & 0x0010:
             added_tile = 4 * kind + unused_copy
-            return Meld(caller, "kakan", from_seat, triplet, added_tile, (), mask)
+            return Meld(
+                caller, MeldKind.KAKAN, from_seat, triplet, added_tile, (), mask
+            )
         raise ValueError(f"Unrecognized pon/kakan mask: {mask}")
 
     if mask & 0x0020:
@@ -77,7 +59,7 @@ def decode_meld(caller: int, mask: int) -> Meld:
         tile = encoded // 4 * 4 + encoded % 4
         if tile // 4 != 30:
             raise ValueError(f"Nuki must be a north tile: mask={mask}")
-        return Meld(caller, "nuki", caller, (tile,), tile, (), mask)
+        return Meld(caller, MeldKind.NUKI, caller, (tile,), tile, (), mask)
 
     encoded = (mask & 0xFF00) >> 8
     called_copy = encoded % 4
@@ -87,6 +69,9 @@ def decode_meld(caller: int, mask: int) -> Meld:
     tiles = tuple(4 * kind + copy for copy in range(4))
     called = 4 * kind + called_copy
     if relative == 0:
-        return Meld(caller, "ankan", caller, tiles, called, tiles, mask)
+        return Meld(caller, MeldKind.ANKAN, caller, tiles, called, tiles, mask)
     consumed = tuple(tile for tile in tiles if tile != called)
-    return Meld(caller, "minkan", from_seat, tiles, called, consumed, mask)
+    return Meld(caller, MeldKind.MINKAN, from_seat, tiles, called, consumed, mask)
+
+
+__all__ = ["Meld", "MeldKind", "decode_meld"]
