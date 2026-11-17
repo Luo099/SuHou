@@ -68,7 +68,40 @@ uv run python -m suhou tenhou-replay \
 
 内部点数统一为“点”；XML 的 `ten`、`sc` 是 100 点单位，`owari` 的场分是独立的小数值。程序忠实重放牌谱并展示记录中的役种，不自行计算役种/和了点数。天凤官方读谱仅用于验收时的正确性对照，不属于程序交付功能或运行依赖。
 
+重放状态中的舍牌和副露额外保留内部字段：舍牌带 `tile_id`/`seq`，副露带 `formed_seq`/`updated_seq`/`added_tile`。加杠的 `called_tile` 是原来碰入的牌，`added_tile` 是加杠追加的牌，二者不再混为同一个字段。这些字段用于观察构造和牌张流转检查，不进入 observation。
+
 本地 `tests/` 目录已加入 `.gitignore`，仅用于开发验证，不纳入版本控制。
+
+## Observation v1
+
+`src/suhou/observation/` 提供结构化的玩家可见局面。observation 的构造器只有一个入口 `build_observation`；逐决策提取可使用包装它的 `iter_decision_points`：
+
+```python
+from suhou.observation import RulesSnapshot, iter_decision_points
+
+def rules_state(round_state, event, viewer):
+    # 规则引擎接入前的占位。furiten 必须由规则引擎计算；
+    # RulesSnapshot 只是显式的最小适配器，不是规则实现。
+    return RulesSnapshot((False, False, False, False))
+
+points = list(iter_decision_points(
+    "data/raw/tenhou/2023041911gm-0001-0000-cba4cded.mjlog",
+    rules_state,
+))
+observation = points[0].observation
+print(observation.to_dict())
+```
+
+- observation 包含 `viewer`、`table`、`self`、`players`、`context`、`history`。`players` 始终按绝对座位 0..3 排列；`self` 只给出当前观察者的手牌、摸入牌和振听。
+- 牌张使用 `Tile(kind, red)` 表示，赤五保留为 `5m/5p/5s + red=True`，不包含实体牌编号。手牌按牌种、赤牌标记排序（同牌种赤牌在前）；舍牌、副露和历史按发生顺序排列。
+- `build_observation(replay_state, rules_state, visible_history, viewer, decision_context)` 逐字段读取当前重放状态，返回不可变快照。它不读取对手手牌内容、对手摸入牌、里宝牌或结算内部字段。
+- `history` 是本局开始到本次决策前的可见事件前缀。自己的起手牌和摸牌有实际牌张，对手摸牌只有 `tile=None`；对手的起手牌不会出现在历史里。后续鸣牌只追加新事件，不回写旧样本。
+- `seq` 是局内源事件序号，每局从 `INIT` 的 0 重新开始；舍牌和副露的 `seq` 与历史事件一致。`trigger_seq` 是触发本次决策的摸牌/舍牌/鸣牌事件。
+- `table.match_type` 从天凤 `<GO type>` 规则位解出（`0x08` 为半庄，`0x10` 为三麻）。当前样例 `type=1` 是东风战；它在东4局无人达到 30000 点后南入到南1局，因此 `match_type` 为 `tonpu`，不是半庄。
+- `DecisionPhase` 目前由提取层按源事件给出（`discard`/`response`/`riichi`/`self_kan`/`tsumo`），属于规则引擎接入前的临时适配。合法动作集合、动作掩码和实际动作标签不放进 observation，仍留给 sample 层。
+- `RulesState` 目前只要求 `furiten(viewer)`。真实振听、临时振听和立直振听必须由复用的规则引擎提供；`RulesSnapshot` 没有默认值，上面显式传入的四家 `False` 只是占位，不能当成规则结果。
+- `iter_decision_points` 是逐实际动作截取 observation 的便捷入口，内部通过 `replay_tenhou(..., before_event=...)` 在事件执行前取数。它不会为未记录的“跳过鸣牌/跳过荣和”补样本；立直宣言与随后的舍牌是两个源事件，会各自产生一个 decision point，sample 层可按需合并。
+- `DecisionPoint` 额外带 `round_ordinal`（局实例序号，连庄时同一 `seed[0]` 仍可区分）、`event_seq`（历史截止位置）和源事件标识。这些是审计/落盘字段，不属于 observation 契约。
 
 ## 当前约定
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,11 @@ class PlayerState:
                     "from_seat": meld.from_seat,
                     "tiles": list(meld.names),
                     "called_tile": tile_name(meld.called_tile),
+                    "added_tile": (
+                        tile_name(meld.added_tile) if meld.added_tile is not None else None
+                    ),
+                    "formed_seq": meld.formed_seq,
+                    "updated_seq": meld.updated_seq,
                     "mask": meld.raw_mask,
                 }
                 for meld in self.melds
@@ -81,6 +87,15 @@ class RoundState:
     results: list[dict[str, Any]] = field(default_factory=list)
     final_scores: tuple[int, int, int, int] | None = None
     final_points: tuple[float, float, float, float] | None = None
+    # Source index of this round's <INIT>; observation/history sequence numbers
+    # are round-local and start at 0 for that event.
+    start_index: int = 0
+    # <GO type> rule bits. Observation uses the hanchan/sanma bits.
+    game_type: int | None = None
+
+    def event_seq(self, event: Event) -> int:
+        """Round-local sequence number of a source event."""
+        return event.index - self.start_index
 
     @property
     def name(self) -> str:
@@ -103,6 +118,7 @@ class RoundState:
         return {
             "index": self.index,
             "name": self.name,
+            "start_index": self.start_index,
             "round_index": self.seed[0],
             "round_wind": self.round_wind.value,
             "dealer": self.dealer,
@@ -220,6 +236,8 @@ def _start_round(state: _ReplayState, event: Event) -> RoundState:
         dora_indicators=[event.seed[5]],
         honba=event.seed[1],
         riichi_sticks=event.seed[2],
+        start_index=event.index,
+        game_type=state.game.game_type,
     )
     state.rounds.append(round_)
     state.round = round_
@@ -281,8 +299,10 @@ def _apply_discard(round_: RoundState, event: Event) -> str:
     riichi = round_.pending_riichi == event.seat
     player.discards.append({
         "tile": tile_name(event.tile),
+        "tile_id": event.tile,
         "riichi": riichi,
         "tsumogiri": tsumogiri,
+        "seq": round_.event_seq(event),
     })
     player.drawn = None
     round_.last_discard = (event.seat, event.tile)
@@ -299,6 +319,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
         raise ReplayError("Call is not valid after the round or before a replacement draw")
     meld = decode_meld(event.seat, event.meld)
     player = round_.players[meld.caller]
+    seq = round_.event_seq(event)
     if meld.kind == "kakan":
         if round_.current_seat != meld.caller or round_.phase != "discard" or player.drawn is None:
             raise ReplayError("Kakan requires the caller's drawn-tile turn")
@@ -314,7 +335,10 @@ def _apply_call(round_: RoundState, event: Event) -> str:
         player.melds[player.melds.index(previous)] = Meld(
             meld.caller, "kakan", meld.from_seat,
             tuple(sorted((*meld.tiles, meld.called_tile))),
-            meld.called_tile, (), meld.raw_mask,
+            previous.called_tile, (), meld.raw_mask,
+            added_tile=meld.called_tile,
+            formed_seq=previous.formed_seq if previous.formed_seq is not None else seq,
+            updated_seq=seq,
         )
         player.drawn = None
         round_.awaiting_replacement_draw = meld.caller
@@ -323,7 +347,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
         if round_.current_seat != meld.caller or round_.phase != "discard" or player.drawn is None:
             raise ReplayError("Ankan requires the caller's drawn-tile turn")
         _remove_player_tiles(player, meld.consumed_tiles, "Ankan")
-        player.melds.append(meld)
+        player.melds.append(replace(meld, formed_seq=seq, updated_seq=seq))
         player.drawn = None
         round_.awaiting_replacement_draw = meld.caller
         round_.phase = "draw"
@@ -331,7 +355,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
         if round_.current_seat != meld.caller or round_.phase != "discard" or player.drawn is None:
             raise ReplayError("Nuki requires the caller's drawn-tile turn")
         _remove_player_tiles(player, (meld.called_tile,), "Nuki")
-        player.melds.append(meld)
+        player.melds.append(replace(meld, formed_seq=seq, updated_seq=seq))
         player.drawn = None
         round_.awaiting_replacement_draw = meld.caller
         round_.phase = "draw"
@@ -340,7 +364,7 @@ def _apply_call(round_: RoundState, event: Event) -> str:
             raise ReplayError("Cannot chi/pon/minkan on one's own turn")
         _take_last_discard(round_, meld)
         _remove_player_tiles(player, meld.consumed_tiles, meld.kind.capitalize())
-        player.melds.append(meld)
+        player.melds.append(replace(meld, formed_seq=seq, updated_seq=seq))
         player.drawn = None
         round_.current_seat = meld.caller
         if meld.kind == "minkan":
@@ -542,12 +566,27 @@ def _apply_result(round_: RoundState, event: Event) -> str:
     return message
 
 
-def replay_tenhou(source: str | Path | GameRecord) -> ReplayResult:
-    """Consume each source event exactly once and return all post-event states."""
+BeforeEvent = Callable[[Event, RoundState | None], None]
+
+
+def replay_tenhou(
+    source: str | Path | GameRecord,
+    *,
+    before_event: BeforeEvent | None = None,
+) -> ReplayResult:
+    """Consume each source event exactly once and return all post-event states.
+
+    ``before_event`` observes the table before an event is applied. It is the
+    seam for capturing decision-time state and must not mutate the replay.
+    For ``INIT`` the round argument is the previous round (``None`` for the
+    first game); callers can use ``event.tag`` to detect the new round.
+    """
     game = parse_replay(source) if isinstance(source, (str, Path)) else source
     state = _ReplayState(game)
     steps: list[ReplayStep] = []
     for event in game.events:
+        if before_event is not None:
+            before_event(event, state.round)
         try:
             if event.tag == "INIT":
                 round_ = _start_round(state, event)

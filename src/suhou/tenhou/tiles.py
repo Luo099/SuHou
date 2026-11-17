@@ -55,14 +55,24 @@ def dora_from_indicator(tile: int) -> int:
     return next_kind * 4
 
 
-def tile_name(tile: int) -> str:
-    """Render a tile without losing its red-five identity."""
+def tile_kind(tile: int) -> str:
+    """Render the tile kind (1m..9m, 1p..9p, 1s..9s, winds, dragons).
+
+    Red fives keep the ordinary ``5m``/``5p``/``5s`` kind; use
+    ``is_red_five`` to distinguish the copy.
+    """
     validate_tile(tile)
-    if is_red_five(tile):
-        return f"0{'mps'[tile // 36]}"
     kind = tile // 4
     if kind < 27:
         return f"{kind % 9 + 1}{'mps'[kind // 9]}"
     if kind < 31:
         return WIND_NAMES[kind - 27]
     return DRAGON_NAMES[kind - 31]
+
+
+def tile_name(tile: int) -> str:
+    """Render a tile without losing its red-five identity."""
+    if is_red_five(tile):
+        validate_tile(tile)
+        return f"0{'mps'[tile // 36]}"
+    return tile_kind(tile)

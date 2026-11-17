@@ -19,6 +19,12 @@ class Meld:
     called_tile: int
     consumed_tiles: tuple[int, ...]
     raw_mask: int
+    # The tile added by a later kakan. A kakan keeps the original pon's
+    # source and called tile, so the two events stay distinguishable.
+    added_tile: int | None = None
+    # Round-local visible event sequence numbers, filled in by the replay.
+    formed_seq: int | None = None
+    updated_seq: int | None = None
 
     @property
     def names(self) -> tuple[str, ...]:
