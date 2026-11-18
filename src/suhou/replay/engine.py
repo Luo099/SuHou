@@ -660,15 +660,37 @@ class ReplayEngine:
             if player.drawn != winning_tile:
                 raise ReplayError("Tsumo machi does not match the current drawn tile")
         else:
-            if round_.last_discard is None:
+            kakan_pending = (
+                round_.awaiting_replacement_draw == from_who
+                and round_.phase == "draw"
+            )
+            if kakan_pending:
+                # Chankan: the winning tile is the added kan tile, not a
+                # discard; kakan already cleared last_discard.
+                added = next(
+                    (
+                        meld.added_tile
+                        for meld in round_.players[from_who].melds
+                        if meld.kind is MeldKind.KAKAN and meld.added_tile is not None
+                    ),
+                    None,
+                )
+                if added is None:
+                    raise ReplayError("Chankan AGARI has no pending kakan tile")
+                if winning_tile is None:
+                    winning_tile = added
+                elif winning_tile != added:
+                    raise ReplayError("Chankan machi does not match the added kan tile")
+            elif round_.last_discard is None:
                 raise ReplayError("Ron AGARI requires a winning discard")
-            discard_seat, discard_tile = round_.last_discard
-            if discard_seat != from_who:
-                raise ReplayError("AGARI fromWho does not match the winning discard")
-            if winning_tile is None:
-                winning_tile = discard_tile
-            elif winning_tile != discard_tile:
-                raise ReplayError("Ron machi does not match the winning discard tile")
+            else:
+                discard_seat, discard_tile = round_.last_discard
+                if discard_seat != from_who:
+                    raise ReplayError("AGARI fromWho does not match the winning discard")
+                if winning_tile is None:
+                    winning_tile = discard_tile
+                elif winning_tile != discard_tile:
+                    raise ReplayError("Ron machi does not match the winning discard tile")
         if payload.hand is not None:
             recorded_hand = Counter(payload.hand)
             if winning_tile not in recorded_hand:

@@ -31,6 +31,7 @@ from suhou.observation.model import (
     DecisionPhase,
     Observation,
 )
+from suhou.replay.engine import ReplayFrame
 from suhou.rules.engine import PlayerRuleEngine
 from suhou.rules.model import (
     AnkanAction,
@@ -73,6 +74,45 @@ class PlayerDecision:
     event_tag: str
 
 
+def apply_decision_frame(
+    engine: PlayerRuleEngine,
+    history: EventHistory,
+    frame: ReplayFrame,
+) -> PlayerDecision | None:
+    """Advance one seat's engine/history by one frame; freeze a decision if any.
+
+    The caller owns ROUND_START resets (rebuild history, engine.update) and
+    METADATA skipping; this helper handles exactly the post-event decision
+    path shared by iter_player_decisions and the sample exporter.
+    """
+    event = frame.event
+    if frame.after is None:
+        raise ObservationError("A round event has no post-event state")
+    decision = engine.update(event, frame.after)
+    history.append(event)
+    if decision is None:
+        return None
+    assert event.round_id is not None and event.seq is not None
+    context = DecisionContext(_PHASES[decision.kind], decision.trigger_seq)
+    observation = build_observation(
+        frame.after,
+        engine,
+        history.view(engine.viewer),
+        engine.viewer,
+        context,
+    )
+    return PlayerDecision(
+        viewer=engine.viewer,
+        decision=decision,
+        observation=observation,
+        round_ordinal=event.round_id,
+        round_index=frame.after.index,
+        event_index=event.source_index,
+        event_seq=event.seq,
+        event_tag=frame.source.tag if frame.source is not None else "",
+    )
+
+
 def iter_player_decisions(
     source: str | Path | GameRecord, viewer: int
 ) -> Iterator[PlayerDecision]:
@@ -93,39 +133,15 @@ def iter_player_decisions(
         event = frame.event
         if event.kind is EventType.METADATA:
             continue
-        if frame.after is None:
-            raise ObservationError("A round event has no post-event state")
         if event.kind is EventType.ROUND_START:
+            assert frame.after is not None
             history = EventHistory(red_fives=frame.after.red_fives)
             engine.update(event, frame.after)
             history.append(event)
             continue
-
-        decision = engine.update(event, frame.after)
-        history.append(event)
-        if decision is None:
-            continue
-        assert event.round_id is not None and event.seq is not None
-        context = DecisionContext(_PHASES[decision.kind], decision.trigger_seq)
-        observation = build_observation(
-            frame.after,
-            engine,
-            history.view(viewer),
-            viewer,
-            context,
-        )
-        points.append(
-            PlayerDecision(
-                viewer=viewer,
-                decision=decision,
-                observation=observation,
-                round_ordinal=event.round_id,
-                round_index=frame.after.index,
-                event_index=event.source_index,
-                event_seq=event.seq,
-                event_tag=frame.source.tag if frame.source is not None else "",
-            )
-        )
+        point = apply_decision_frame(engine, history, frame)
+        if point is not None:
+            points.append(point)
     return iter(points)
 
 
@@ -181,6 +197,7 @@ def _sorted_tiles(tiles: tuple[int, ...], red_fives: bool) -> tuple[Tile, ...]:
 
 __all__ = [
     "PlayerDecision",
+    "apply_decision_frame",
     "iter_player_decisions",
     "match_event_action",
 ]

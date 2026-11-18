@@ -191,6 +191,48 @@ KakanAction / RiichiAction / TsumoAction / RonAction / KyushuAction / PassAction
 
 本地验收使用现有 442 事件、5 局样例：225 个实际动作（切牌、鸣牌、立直宣言、和了）逐一映射到对应事件后的候选集合，全部匹配且唯一。样例共产生 277 个决策窗口（204 个 `turn`、62 个 `response`、7 个 `after_call`、4 个 `riichi_discard`）；其中 7 个响应窗口被实际吃/碰、3 个被实际荣和、52 个是合法的未取用吃碰杠窗口，未取用的荣和窗口为 0。新决策点总数大于 225，未取用窗口没有 pass 标签。旧 `iter_decision_points()` 的 225 点基线、`events.jsonl` 往返和 observation JSON 契约保持不变。本地 `tests/` 不纳入版本控制，交付验证只运行 `uv run pytest` 与 `uv run ruff check .`。
 
+## 决策样本导出
+
+`src/suhou/samples/` 把整份四人牌谱逐事件重放成 JSONL 决策样本：每行一个决策窗口，包含观察、合法动作、可确认的标签和审计定位。四个座位共享一批 `iter_replay()` 不可变帧，每座位一个 `PlayerRuleEngine`；每帧先用记录事件结算已打开窗口（标签唯一命中候选才落 `target_index`），再冻结新窗口的观察与候选。`iter_player_decisions()` 与样本导出共用同一个 `apply_decision_frame()`，两条路径的观察/候选生成逻辑只有一份。
+
+```powershell
+uv run python -m suhou export-samples data/raw/tenhou/2023050220gm-0029-0000-1acfd1d3.mjlog -o data/processed/2023050220gm-0029-0000-1acfd1d3.samples.jsonl
+# 只导出座位 0（输出与全量导出按 seat 筛选逐字节一致）：
+uv run python -m suhou export-samples <input.mjlog> -o <out.jsonl> --viewer 0
+```
+
+```python
+from suhou.samples import export_samples, iter_decision_samples
+
+for sample in iter_decision_samples("data/raw/tenhou/sample.mjlog", viewer=0):
+    row = sample.to_dict()          # 即 JSONL 一行的内容
+stats = export_samples("data/raw/tenhou/sample.mjlog", "samples.jsonl")
+```
+
+每行五个固定字段：
+
+| 字段 | 含义 |
+|---|---|
+| `schema_version` | 固定 `1` |
+| `observation` | 原样 `Observation.to_dict()`，历史截止**含触发事件**，与 `iter_player_decisions` 完全一致 |
+| `legal_actions` | 引擎产出顺序的动作列表（`discard/chi/pon/minkan/ankan/kakan/riichi/tsumo/ron/kyushu/pass`），牌张为 `{"kind","red"}`，不排序不去重 |
+| `target_index` | 本行 `legal_actions` 内的标签下标；未标注为 `null`，**绝不补 pass 标签** |
+| `audit` | `log_id`、局/座位、窗口类型、`trigger`/`label` 源事件定位（`seq`、`source_index`、`event_type`、`source_tag`、`actor`）、`unlabelled_reason` |
+
+对齐语义：
+
+- 自机窗口（`turn/after_call/riichi_discard`）必被本人后续动作结算；响应窗口按归属规则关闭：他家鸣牌截断、牌局继续摸牌、流局或结算组收齐都记 `response_not_taken`（牌谱无法区分主动跳过与被截断）。新宝牌 `DORA` 不关闭抢杠窗口，岭上摸牌才证明抢杠未取用。
+- 一炮多响按每条 `AGARI` 的 `who/from_who` 各自结算；抢杠荣和按加杠者匹配 `kan_response`（重放引擎已支持抢杠结算校验）。九种九牌流局只在唯一归属到含 `KyushuAction` 的摸牌窗口时标注，否则记 `kyushu_not_confirmed`，不算错误。
+- 牌谱明确记录的动作找不到唯一可归属窗口、候选命中 0 次或多次、局末残留自机窗口等都是**对齐错误**：导出失败（`SampleAlignmentError`，CLI 打印 `export-samples: <消息>` 返回 2），不产出半份文件。导出先写同目录 `.tmp`，整份校验通过后 `os.replace` 原子替换，失败保留已存在的目标文件。
+- 行序按 `(round_ordinal, trigger.seq, viewer)` 升序；UTF-8、`\n` 行尾、`sort_keys=True`，重复导出逐字节一致；gzip 输入与明文输出一致（`log_id` 取去 `.gz` 后的 stem）。
+
+本地基线（`tests/` 不入库，数字在此可复核）：
+
+- `2023041911gm-0001-0000-cba4cded.mjlog`：窗口 277（after_call=7 response=62 riichi_discard=4 turn=204），已标注 225，未标注 52（全部为未取用吃碰杠响应）。
+- `2023050220gm-0029-0000-1acfd1d3.mjlog`：窗口 581（after_call=23 response=113 riichi_discard=7 turn=438），已标注 497，未标注 84；按座位 145/153/140/143。第 0 局座位 0 的 `seq=32` 行回答"要不要碰这张白"（response，标签是下一条 `N`），`seq=33` 行回答"碰完之后切哪张"（after_call，标签是切 6s 的 `D`）——同一个 `N` 事件既是上一窗口的答案又是下一窗口的触发。
+
+切牌的 37 类动作编码、张量化与训练管线属于下一阶段，不在 v1 样本契约内。
+
 ## 当前约定
 
 - 训练/验证/测试集按完整对局划分，不能按单步决策随机划分。
