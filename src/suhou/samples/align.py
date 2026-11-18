@@ -26,7 +26,7 @@ _SELF_KINDS = frozenset(
     {RuleDecisionKind.TURN, RuleDecisionKind.AFTER_CALL, RuleDecisionKind.RIICHI_DISCARD}
 )
 _RESPONSE_KINDS = frozenset({RuleDecisionKind.RESPONSE, RuleDecisionKind.KAN_RESPONSE})
-_KYUSHU_REASON = "kyushukyuhai"
+_KYUSHU_REASONS = frozenset({"yao9", "kyushukyuhai"})
 _RESPONSE_NOT_TAKEN = "response_not_taken"
 _KYUSHU_NOT_CONFIRMED = "kyushu_not_confirmed"
 
@@ -138,7 +138,7 @@ class Aligner:
                 self.close_round(event)
         else:
             assert isinstance(payload, RyuukyokuPayload)
-            if payload.reason == _KYUSHU_REASON:
+            if payload.reason in _KYUSHU_REASONS:
                 self._settle_kyushu(event, source_tag)
             if payload.group_final:
                 self.close_round(event)

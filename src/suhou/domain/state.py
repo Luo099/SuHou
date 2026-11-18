@@ -164,6 +164,7 @@ class RoundState:
     # Sequential round instance in the game (renchan keeps the same index).
     round_id: int = 0
     _explicit_match_type: MatchType | None = field(default=None, repr=False)
+    pending_kakan_tile: int | None = None
 
     @property
     def match_type(self) -> MatchType | None:

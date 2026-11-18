@@ -379,6 +379,7 @@ class ReplayEngine:
         player.drawn = payload.tile
         player.hand[payload.tile] += 1
         round_.awaiting_replacement_draw = None
+        round_.pending_kakan_tile = None
         if not replacement:
             round_.normal_draws += 1
             if round_.normal_draws > 70:
@@ -467,6 +468,7 @@ class ReplayEngine:
             player.melds[player.melds.index(previous)] = meld
             player.drawn = None
             round_.awaiting_replacement_draw = caller
+            round_.pending_kakan_tile = payload.added_tile
             round_.phase = "draw"
         elif kind is MeldKind.ANKAN:
             if round_.current_seat != caller or round_.phase != "discard" or player.drawn is None:
@@ -645,6 +647,7 @@ class ReplayEngine:
         round_.pending_riichi = None
         if payload.group_final:
             round_.finished = True
+            round_.pending_kakan_tile = None
             self._open_result_group = None
         return message
 
@@ -660,23 +663,9 @@ class ReplayEngine:
             if player.drawn != winning_tile:
                 raise ReplayError("Tsumo machi does not match the current drawn tile")
         else:
-            kakan_pending = (
-                round_.awaiting_replacement_draw == from_who
-                and round_.phase == "draw"
-            )
-            if kakan_pending:
-                # Chankan: the winning tile is the added kan tile, not a
-                # discard; kakan already cleared last_discard.
-                added = next(
-                    (
-                        meld.added_tile
-                        for meld in round_.players[from_who].melds
-                        if meld.kind is MeldKind.KAKAN and meld.added_tile is not None
-                    ),
-                    None,
-                )
-                if added is None:
-                    raise ReplayError("Chankan AGARI has no pending kakan tile")
+            added = round_.pending_kakan_tile
+            if added is not None and round_.awaiting_replacement_draw == from_who:
+                # The added tile stays pending through the whole settlement group.
                 if winning_tile is None:
                     winning_tile = added
                 elif winning_tile != added:
